@@ -1,0 +1,558 @@
+#define PAL_TARGET_CLOCK_RATE 40000000
+#include "pal_framebuffer_bram.hch"
+#include "pal_master.hch"
+#include "stdlib.hch"
+
+macro expr largeur     = 200;  
+macro expr hauteur    = 160;
+macro expr d = 4;
+macro expr hauteur_comp = hauteur/d;
+macro expr largeur_comp = largeur/d;
+macro expr ClockRate = PAL_ACTUAL_CLOCK_RATE;
+macro expr typeRB = log2ceil(31*d*d+1);
+macro expr typeG = log2ceil(63*d*d+1);
+macro expr typeCpt = log2ceil(largeur/d+1);
+macro expr typeCptTableau = log2ceil(largeur*hauteur+1);
+macro expr tailleTableau = hauteur_comp * largeur_comp;
+macro expr typeCptTableauComp = log2ceil(tailleTableau+1);
+
+
+// la fonction aquisition 
+macro proc acquisition (cOut)
+{
+    unsigned 11 x, y, xA, yA;
+    unsigned 16 pixel;
+   
+    par{
+        RC10CameraRun (OV9650_RGB565_QVGA, ClockRate);
+        seq{
+            par{
+                xA = 0;
+                yA = 0;
+                RC10CameraReadRGB565      (&x, &y, &pixel);   
+            }
+            while(1)
+                par {
+                    RC10CameraReadRGB565      (&x, &y, &pixel);
+                    if(x == xA && y==yA)
+                        par{
+                            cOut ! pixel;
+                            xA =  (xA == (largeur-1) ? 0 : (xA +1));
+                            yA =  ((xA == (largeur-1) ) ? ((yA == (hauteur-1)) ? 0 : yA +1): yA );
+                        }
+                    else
+                        delay;
+                }
+        }
+    }
+}
+
+
+// la fonction comparaison 
+   
+ macro proc compression (cIn, cOut)
+{
+    unsigned typeRB tableauSommeR[largeur_comp], tableauSommeB[largeur_comp];
+    unsigned typeG tableauSommeG[largeur_comp];
+    unsigned typeRB valB,  valR;
+    unsigned typeG valG;
+    unsigned 16 pixel;   
+    unsigned typeCpt cptLargeurTemp;//compteur sur les tableau des champs rouge et vert et bleu  
+    unsigned 16 cptHauteur; // compteur sur la hauteur de 0 a d
+    unsigned 16 cptLargeur; // compteur sur la largeur de l image originale
+    unsigned typeRB val1R;
+    unsigned typeG val2G;
+    unsigned typeRB val3B;
+   
+    par{
+        cptLargeurTemp=0;
+        cptHauteur=0;
+        cptLargeur=0;
+        val1R=0;
+        val2G=0;
+        val3B=0;
+       
+       }
+       // initialiser le tableau des champs constituant les pixel de l'image 
+           par(i=0;i< largeur_comp; i++){
+                     tableauSommeR[i] = 0;
+                     tableauSommeB[i] = 0;
+                     tableauSommeG[i] = 0;
+                     }       
+
+      
+    while(1){
+       
+          cIn ? pixel;
+          
+         if(cptLargeur==0){ // ici si le compteur de la largeur egale 0 alors le compteur des tableau reçois 0
+                      cptLargeurTemp = 0;//compteur des tableau
+                      }
+                     
+             
+        par{            
+            valR = 0@pixel[15:11]; // recuperer le champ rouge 
+            tableauSommeR[cptLargeurTemp] = tableauSommeR[cptLargeurTemp] + (valR);   // modifier la valeur de la somme des champs rouges          
+            valB = 0@pixel[4:0]; // recuperer le champ bleu 
+            tableauSommeB[cptLargeurTemp] = tableauSommeB[cptLargeurTemp] + (valB) ;// modifier la valeur de la somme des champs bleu    
+            valG = 0@pixel[10:5]; // recuperer le champ vert 
+            tableauSommeG[cptLargeurTemp] = tableauSommeG[cptLargeurTemp] + (valG) ;     // modifier la valeur de la somme des champs vert          
+            }
+            cptLargeur++;
+           
+                 if (cptLargeur == largeur){ // si le compteur de largeur est egale a largeur 
+                 cptLargeur=0; // remettre le compteur largeur a 0
+                 cptHauteur++; // augmenter le compteur hauteur
+                 }
+               
+               
+               
+                if(((cptHauteur+1)==d)&&(((cptLargeur+1)%d)==0)&&(cptLargeur!=0)){ // si on arrive a la largeur et a la hauteur de la matrice pixel qu on somme    
+                 par{
+                 val1R= tableauSommeR[cptLargeurTemp]/(d*d);// on recupere la valeur  moyenne des pixels qu on a somme dans le tableau des champs  rouges 
+                 val2G= tableauSommeG[cptLargeurTemp]/(d*d);// on recupere la valeur  moyenne des pixels qu on a somme dans le tableau des champs  vert
+                 val3B= tableauSommeB[cptLargeurTemp]/(d*d);// on recupere la valeur  moyenne des pixels qu on a somme dans le tableau des champs  bleu 
+                    }
+                   
+                 pixel = val1R[4:0] @ val2G[5:0] @ val3B[4:0]; // on constitue le nouveau pixel 
+                    
+                 cOut ! pixel; // on envoie le pixel 
+                    
+                  par{// on remet les cases des tableauxa zero
+                 tableauSommeR[cptLargeurTemp]=0;
+                 tableauSommeG[cptLargeurTemp]=0;
+                 tableauSommeB[cptLargeurTemp]=0;
+                 val1R= 0;
+                 val2G= 0;
+                 val3B=0;
+                 }
+                
+            }
+            
+              if(cptHauteur == d) cptHauteur=0; // on a terminer un pixel compresse alors on passe a un autre
+                 if (((cptLargeur+1) % d) == 0){ // on passe a un autre pixel 
+                 cptLargeurTemp++;
+                 }
+    }
+}
+
+
+// la fonction memorisation 
+
+macro proc memorisation(cIn,pixelOut1, pixelOut2, choix)
+{
+    unsigned typeCptTableauComp cptPixel;
+    unsigned 16 pixel;
+    unsigned 16 pixelTemp;
+    unsigned 16 cptImage;
+    ram unsigned 16 tableau[tailleTableau];
+    
+     par{
+          cptPixel = 0;
+          cptImage=0;
+     }
+while(1){
+    
+        cIn ? pixel;
+    
+      if(cptPixel==tailleTableau){ //on compare si on est dans la deuxiemme image
+            cptPixel=0;     
+            cptImage++;
+        }
+        
+       if((cptImage == 0)){ //on compare si l'image est la premiere 
+         tableau[cptPixel] = pixel;
+         cptPixel++;
+        }
+        
+       if( (cptImage > 0)  ){ // on recoit un pixel d'une nouvelle image            
+           pixelTemp =  tableau[cptPixel];
+         par{           
+            pixelOut1 ! pixel;  //j'envoie en sortie le pixel courant, dans tous les cas je l'envoie
+            pixelOut2 ! pixelTemp; //le pixel memorise
+          } 
+            if(choix == 1){
+               tableau[cptPixel] =  pixel;
+            }
+           cptPixel++;
+        }
+    }
+}
+
+
+
+// la fonction comparaison 
+
+macro proc comparaison(pixelIn1, pixelIn2, choix, seuilRes, res, PixelSortie){
+    
+    unsigned typeCptTableau cptPixel;
+    unsigned 16 pixel1,pixel2,pixelAffichTemp;
+    unsigned 5 valR,valR2, valB, valB2;
+    unsigned 6 valG, valG2;
+    unsigned 5 resultatR, resultatB;
+    unsigned 6 resultatG;
+    unsigned 1 resBool;
+    unsigned 6 seuil;
+    
+    while(1){
+        
+        par{ 
+         pixelIn1 ? pixel1;
+         pixelIn2 ? pixel2;
+         seuilRes ? seuil;
+         }
+         
+         par{             
+           
+            valR = 0@pixel1[15:11]; // recupere la valeur du champs rouge du pixel1 
+            valB = 0@pixel1[4:0];// recupere la valeur du champs bleu du pixel1 
+            valG = 0@pixel1[10:5];// recupere la valeur du champs vert du pixel1 
+             
+            valR2 = 0@pixel2[15:11];// recupere la valeur du champs rouge du pixel2
+            valB2 = 0@pixel2[4:0]; // recupere la valeur du champs bleu du pixel2 
+            valG2 = 0@pixel2[10:5];// recupere la valeur du champs vert du pixel1 
+             
+             }
+        
+        if(choix == 0){
+            // recuperer la valeur absolue de la defference des champs du pixel 
+            par{
+            resultatR=(valR>valR2)?  (valR - valR2) : (valR2-valR) ;  
+            resultatG=(valG>valG2)?  (valG - valG2) : (valG2- valG);
+            resultatB=(valB>valB2) ?  (valB - valB2) : (valB2-valB);
+            }
+            resBool =((0@resultatR>seuil)||(resultatG>seuil)||(0@resultatB>seuil))? 1 : 0; // si le resultat de la valeur absolue de la defference d un des champs du pixel est superieur au seuil envoie 1 si non 0  
+            
+           par{
+            res ! resBool;
+            PixelSortie ! pixel1;
+           }
+        }
+       
+       
+        if (choix == 1){
+            // ici si je choisis l autre maniere de comparaison 
+            // recuperer la valeur  de la devision du maximum sur le minimum des champs du pixel 
+            par{
+            resultatR=(valR>valR2)?(valR/valR2) : (valR2/ valR) ;
+            resultatG=(valG>valG2)? valG/valG2 : (valG2/ valG);
+            resultatB=(valB>valB2) ? valB/valB2 : (valB2/ valB);
+            }
+             // envoye le resultat binaire 
+            resBool =((0@resultatR> 2 * resultatG )||(resultatR>2* resultatB)||(resultatG> 2* 0@resultatR)|| (resultatG> 2* 0@resultatB)||(0@resultatB> 2* resultatG)|| (resultatB> 2* resultatR) )? 1 : 0;
+           
+            par{
+            res ! resBool;         //envoie du boolean en sortie 
+            PixelSortie ! pixel1; // envoie du pixel en sortie 
+           }
+        }
+    }
+    }
+
+    
+    
+//la fonction morpho
+    
+macro proc morpho(pin,out,confRes){
+  
+    unsigned 1 res;
+    unsigned 1 pixel[9];
+    unsigned 1 conf;
+    
+    while(1){
+        par{
+    
+            confRes ? conf;            
+            par(i=0;i<9;i++){
+                pin[i] ? pixel[i];
+            }
+        }
+    
+        if(conf == 0 ){ //on fait de la delatation
+            res=0;
+            seq(i=0;i<9;i++){
+                if(pixel[i]==1){ 
+                    res=1;
+                }
+            }
+        }
+        else{            //on fait de l erosion 
+            res=1;
+            seq(i=0;i<9;i++){
+                if(pixel[i]==0) {
+                    res=0;
+                } 
+        }
+    }
+    
+   
+     out ! res;
+    
+    
+    }
+}    
+
+// la fonction voisinage
+ 
+macro proc voisinage (pixIn, voisOut, pixelTempIn) 
+ 
+{
+    unsigned 1 fifo[2 * largeur_comp +3], pix;
+	unsigned 9 cptTour;
+	unsigned 11 x, y;
+    unsigned 16 tempIn; 
+   
+  par{
+    cptTour = 0;
+    x=0;
+    y=0;
+  }
+ 
+    while(1){
+         
+        par{
+        pixIn ? pix;
+        pixelTempIn ? tempIn; //recevoir le pixel 
+        }
+      
+        par{
+            //intégration du pixel dans la fifo et décalage de la fifo en parallèle
+            fifo[0] = pix;
+            par (i=0; i<2*largeur_comp+2 ;i++)
+            {
+                fifo[i+1] = fifo[i];
+            }
+        }
+        
+        
+            
+            
+        
+        if(cptTour == largeur_comp + 1 ){
+                  par{
+                      voisOut[0] ! ((x==0)||(y==0))? 0 : fifo[2*largeur_comp+2];
+                      voisOut[1] ! ((y==0))? 0: fifo[2*largeur_comp+1];
+                      voisOut[2] ! ((y==0) || (x == largeur_comp-1))?0 : fifo[2*largeur_comp];
+                      voisOut[3] ! ((x==0))?0 : fifo[largeur_comp+2];
+                      voisOut[4] ! fifo[largeur_comp+1];
+                      voisOut[5] ! ((x == largeur_comp-1))?0 : fifo[largeur_comp];
+                      voisOut[6] ! ((x==0)||(y==hauteur_comp-1))?0 : fifo[2];
+                      voisOut[7] ! ((y==hauteur_comp-1))?0 : fifo[1];
+                      voisOut[8] ! ((x== largeur_comp-1)||(y==hauteur_comp-1))?0 : fifo[0];
+                      x = (x == (largeur_comp-1) ? 0 : x +1);
+                      y = (x == (largeur_comp-1)) ? ((y == (hauteur_comp-1)) ? 0 : y+1) : y ;
+                 }
+                  
+        }
+        else
+            cptTour ++;
+    }
+}
+
+//affichage binaire 
+
+//la fonction affichage bin pour affichage en binaire, on utilise deux pixel pour recevoir la valeur binaire et le pixel sur 16 bits pour ne pas avoir un inter-blocage 
+macro proc affichageBin (pixelIn, pixelIn16) 
+{
+	unsigned 11 x, y;
+	unsigned 1 Pixel;     //on recoit le boolean pour eviter l'interblocage
+    unsigned 16 Pixel16;  //on recoit le pixel sur 16 bit
+	
+    macro expr VideoOut  = PalVideoOutOptimalCT (ClockRate);
+    PalFrameBufferRGB565 FB;
+    
+
+	par{
+		PalFrameBufferRGB565Run (&FB, largeur_comp, hauteur_comp, 2, VideoOut, ClockRate);
+		seq{
+			par{
+				pixelIn ? Pixel;
+                pixelIn16 ? Pixel16;
+				x=0;
+				y=0;
+				}
+			while(1){
+				par{
+					PalFrameBufferRGB565Write (&FB, (0 @ x ), (0 @ y), Pixel?0b1111111111111111:0);
+					pixelIn ? Pixel;
+                    pixelIn16 ? Pixel16;//pour ne pas avoir le probleme de blocage 
+					x = (x == (largeur_comp-1) ? 0 : x +1);
+                    y = (x == (largeur_comp-1)) ? ((y == (hauteur_comp-1)) ? 0 : y+1) : y ;
+					}
+			}	
+		}
+	}
+}
+
+// fonction affichage 
+
+// Cette fonction affichage permet d'afficher les pixel signalé en rouge , on utilise deux pixel pour recevoir la valeur binaire et le pixel sur 16 bits pour ne pas avoir un inter-blocage 
+macro proc affichage2(cIn,resBool)
+{
+    unsigned 11 x, y;
+    unsigned 16 pixel,pixel2;
+    unsigned 1 resBoolTemp;
+    unsigned 5 valR, valB;
+    unsigned 6 valG;
+    macro expr VideoOut  = PalVideoOutOptimalCT (ClockRate);
+    PalFrameBufferRGB565 FB;
+
+    par{
+        PalFrameBufferRGB565Run (&FB, largeur_comp, hauteur_comp, 2, VideoOut, ClockRate);
+        
+
+        seq{
+          
+         par{
+                cIn ? pixel;                
+                resBool ? resBoolTemp;
+                x=0;
+                y=0;
+            }
+    
+while(1){
+    
+        par{
+            valR = pixel[15:11];
+            valB = pixel[4:0];
+            valG = pixel[10:5];
+            }
+            
+            if(resBoolTemp == 1){
+             par{
+                valR = 0b11111;// on met le rouge dans pixel a sa valeur maximal
+             }
+            }
+            
+            pixel = valR @ valG @ valB;
+            
+                par{
+                    PalFrameBufferRGB565Write (&FB, (0 @ x), (0 @ y), pixel);
+                    cIn ? pixel;
+                    resBool ? resBoolTemp;
+                    x =  (x == (largeur_comp-1) ? 0 : (x + 1));
+                    y =  ((x == (largeur_comp-1)) ? ((y == (hauteur_comp-1)) ? 0 : y + 1):y);
+                }
+
+             
+            }   
+        }
+    }
+}
+
+
+
+//Le controleur
+
+macro proc controleur2(seuilOut,config1Out,config2Out)
+{
+	unsigned 2 mode; //variable d'etat pour mode de configuration
+	unsigned 23 attente; //compteur pour temps d'attente pour le joystick
+	unsigned 6 seuil; //seuil de detection
+
+	//initialisations
+	par{
+		mode =0; //etat initial 
+		seuil = 0;
+		}
+        
+	par{
+		//gestion du joystick
+		while(1){
+     		if (RC10ButtonLeftRead () && mode>0) //si joystick a gauche, mode --
+				mode --;
+			else
+				if (RC10ButtonRightRead () && mode<3) //si joystick a droite, mode ++
+					mode ++;
+				else
+					if (RC10ButtonUpRead () && seuil<31) //si joystick haut seuil ++
+						seuil ++;
+					else
+						if (RC10ButtonDownRead () && seuil>0) //si joystick bas seuil --
+							seuil --;
+							else
+								delay;
+
+			//positionnement des led pour affichage mode
+			switch(mode){
+				case 0 : 
+					RC10LEDWriteMask(0b10000000);
+					break; 
+				case 1 : 
+					RC10LEDWriteMask(0b01000000);
+					break; 
+				case 2 : 
+					RC10LEDWriteMask(0b00100000);
+					break; 
+				default :
+					delay;
+					break;
+			}
+					
+			do //attente necessaire pour ralentir la mise a jour de l'etat
+            {
+                attente++;
+            } while (attente != 0);
+		}
+
+		//envoi des commandes
+		while(1)
+         config1Out ! mode[0];
+            
+        while(1)
+         config2Out ! mode[1];
+
+		while(1)
+			seuilOut ! seuil;
+			
+		}	 
+}
+
+
+void main (void)
+{
+    chan unsigned 1 voisOut[9], voisOut2[9], outDeMorpho, outDeMorpho2;
+    chan unsigned 16 c1,c2,c3;
+    unsigned 1 choixM, ChoixComp, choixMorpho, choixMorpho2;  //deux variante(choixXomp pour la methode de comparaison, choixM pour le choix de sauvegarde dimage )
+    
+    //  chan unsigned 5  seuil;
+    
+    chan unsigned 1 res; //0 pour delatation et 1 pour erosion 
+    chan unsigned 16 cOut1, cOut2, pixelSortie;//cout1 pour le pixel courant et cout2 pour le pixel memoriser
+    chan unsigned 6 seuil; // le seuil choisi, quand il est plus petit ya plus de pixel rouge avec la methode 2
+    chan unsigned 1 config1, config2; // pour controler les valeur passer en parametre pour la fonction morpho 
+    
+    choixM = 1; //  0 pour sauvegarder seulement image1 et 1 pour memoriser toutes les images
+    ChoixComp = 0; // 0 comparaison avec la  variante 1(sortie de 0 ou 1 de la fonction  comparaison depend de la valeur du seul) et 1  pour variante 2(sortie de 0 ou 1 de la fonction  comparaison depend de la composition rouge et vert et bleu du pixel) 
+    choixMorpho = 0; // on fait de la delatation 
+    choixMorpho2 = 1; 
+    
+    
+  par{
+        acquisition (c1); // reception du pixel
+        compression(c1,c3);// compression de l image       
+        memorisation(c3,cOut1, cOut2, choixM);// memorisation des pixel 
+        controleur2(seuil,config1,config2); // je fait le controle du joystick pour seuil et delitation et erosion 
+      
+      
+        comparaison(cOut1, cOut2, ChoixComp, seuil, res, pixelSortie); // comparaison, qui renvoie en sortie un boolean res et le pixel de sortie pixelsortie
+      
+      //morpho et voisinage
+      
+        voisinage (res, voisOut, pixelSortie); // voisinage 
+        morpho(voisOut,outDeMorpho,config1);   //morphologie 
+      
+        voisinage(outDeMorpho, voisOut2, pixelSortie);// voisinage 
+        morpho(voisOut2,outDeMorpho2,config2);  // morphologie
+      
+        //les deux affichage 
+      
+      //  affichageBin(outDeMorpho2, pixelSortie);//affichage binaire en appelant cette fonction
+        affichage2(pixelSortie, outDeMorpho2); //augmenter la valeur du champ rouge des pixel signale et affichage normal des autre pixel 
+      }
+      //pour controle avant voisinage
+     // affichageBin(res, pixelSortie);// ici pour controler la bonne execution de la fonction comparaison et affichage binaire (si ça marche) 
+     //  affichage2(pixelSortie, res); // ici pour controler  comparaison et si il envoie un pixel significatif on l affiche des pixel significatif en rouge  
+   
+}  
+
